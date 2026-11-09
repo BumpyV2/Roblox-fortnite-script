@@ -1,186 +1,181 @@
 --[[
-    AimTrainer.lua
-    Aim-training & debugging tool — local script
-    Features: FOV circle, target line, soft aim assist, target filters, settings UI, server permission check
+    Roblox Enhanced — Aim Trainer
+    Local-script executor module
+    Features: FOV circle · target line · soft aim assist · target filters · settings UI · server permission gate
 ]]
 
--- ── Services ────────────────────────────────────────────────────────────────
-local Players            = game:GetService("Players")
-local RunService         = game:GetService("RunService")
-local UserInputService   = game:GetService("UserInputService")
-local TweenService       = game:GetService("TweenService")
-local Camera             = workspace.CurrentCamera
+-- ── Services ─────────────────────────────────────────────────────────────────
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
+local Camera            = workspace.CurrentCamera
 
-local LocalPlayer        = Players.LocalPlayer
-local Mouse              = LocalPlayer:GetMouse()
+local LocalPlayer       = Players.LocalPlayer
 
--- ── Permission gate ──────────────────────────────────────────────────────────
--- The server must expose a RemoteFunction called "AimTrainer_CheckPermission"
--- inside ReplicatedStorage.  It should return true for the local player when
--- they are in a private training session or are on the approved-tester list.
--- If the RemoteFunction is absent we fall back to a solo-only check.
-local RS = game:GetService("ReplicatedStorage")
+-- ── Permission gate ───────────────────────────────────────────────────────────
+-- Server must expose ReplicatedStorage.AimTrainer_CheckPermission (RemoteFunction).
+-- Returns true for approved testers / private sessions.
+-- Falls back to solo-only when the RF is absent.
+local RS     = game:GetService("ReplicatedStorage")
 local permRF = RS:FindFirstChild("AimTrainer_CheckPermission")
 
 local function checkPermission()
     if permRF and permRF:IsA("RemoteFunction") then
-        local ok, result = pcall(function()
-            return permRF:InvokeServer()
-        end)
+        local ok, result = pcall(function() return permRF:InvokeServer() end)
         return ok and result == true
     end
-    -- Fallback: allow only when the server has exactly 1 player (private session)
     return #Players:GetPlayers() == 1
 end
 
 if not checkPermission() then
-    warn("[AimTrainer] Permission denied — not in a private session or approved tester list.")
+    warn("[AimTrainer] Permission denied — not in a private session or approved-tester list.")
     return
 end
 
--- ── Default settings ─────────────────────────────────────────────────────────
+-- ── Default settings ──────────────────────────────────────────────────────────
 local cfg = {
     enabled         = true,
     showLine        = true,
     showFOV         = true,
     aimAssist       = false,
 
-    fovRadius       = 120,          -- pixels
-    assistStrength  = 0.08,         -- 0-1 lerp factor per frame
+    fovRadius       = 120,      -- pixels
+    assistStrength  = 5,        -- mouse delta multiplier (1-20 range)
 
-    maxDistance     = 500,          -- studs
-    filterTeam      = true,         -- skip same-team players
-    filterVisible   = true,         -- skip players behind walls
-    filterAlive     = true,         -- skip dead players
+    maxDistance     = 500,      -- studs
+    filterTeam      = true,
+    filterVisible   = true,
+    filterAlive     = true,
 
-    toggleKey       = Enum.KeyCode.RightAlt,
-    lineKey         = Enum.KeyCode.F1,
-    fovKey          = Enum.KeyCode.F2,
-    assistKey       = Enum.KeyCode.F3,
+    toggleKey  = Enum.KeyCode.RightAlt,
+    lineKey    = Enum.KeyCode.F1,
+    fovKey     = Enum.KeyCode.F2,
+    assistKey  = Enum.KeyCode.F3,
 }
 
--- ── State ────────────────────────────────────────────────────────────────────
-local uiOpen  = false
-local nearest = nil   -- current best target (Model)
+-- ── State ─────────────────────────────────────────────────────────────────────
+local uiOpen    = false
+local nearest   = nil   -- nearest eligible character Model
+local assistBtn = nil   -- forward reference for keybind handler
 
--- ── Drawing layer ────────────────────────────────────────────────────────────
-local fovCircle = Drawing.new("Circle")
-fovCircle.Visible   = false
-fovCircle.Thickness = 1.5
-fovCircle.Color     = Color3.fromRGB(255, 255, 255)
-fovCircle.Filled    = false
-fovCircle.NumSides  = 64
+-- ── Drawing ───────────────────────────────────────────────────────────────────
+local fovCircle       = Drawing.new("Circle")
+fovCircle.Visible     = false
+fovCircle.Thickness   = 1.5
+fovCircle.Color       = Color3.fromRGB(255, 255, 255)
+fovCircle.Filled      = false
+fovCircle.NumSides    = 64
 
-local targetLine = Drawing.new("Line")
-targetLine.Visible   = false
-targetLine.Thickness = 1.5
-targetLine.Color     = Color3.fromRGB(255, 80, 80)
+local targetLine      = Drawing.new("Line")
+targetLine.Visible    = false
+targetLine.Thickness  = 1.5
+targetLine.Color      = Color3.fromRGB(255, 80, 80)
 
--- ── Helper: get character root ───────────────────────────────────────────────
-local function getRoot(character)
-    return character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("UpperTorso"))
+-- ── Helpers ───────────────────────────────────────────────────────────────────
+local function getRoot(char)
+    return char and (char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("UpperTorso"))
 end
 
-local function getHumanoid(character)
-    return character and character:FindFirstChildOfClass("Humanoid")
+local function getHumanoid(char)
+    return char and char:FindFirstChildOfClass("Humanoid")
 end
 
--- ── Helper: team check ───────────────────────────────────────────────────────
 local function sameTeam(player)
     if not cfg.filterTeam then return false end
     return player.Team ~= nil and player.Team == LocalPlayer.Team
 end
 
--- ── Helper: visibility raycast ───────────────────────────────────────────────
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 
-local function isVisible(origin, targetPos, character)
+local function isVisible(origin, targetPos, char)
     local localChar = LocalPlayer.Character
-    local excludeList = {}
-    if localChar then table.insert(excludeList, localChar) end
-    if character then table.insert(excludeList, character) end
-    rayParams.FilterDescendantsInstances = excludeList
-
-    local dir    = (targetPos - origin)
+    local ex = {}
+    if localChar then table.insert(ex, localChar) end
+    if char      then table.insert(ex, char) end
+    rayParams.FilterDescendantsInstances = ex
+    local dir    = targetPos - origin
     local result = workspace:Raycast(origin, dir, rayParams)
-    -- If nothing was hit, or the hit is part of the target character, it's visible
     if not result then return true end
-    if character and result.Instance:IsDescendantOf(character) then return true end
-    return false
+    return char ~= nil and result.Instance:IsDescendantOf(char)
 end
 
--- ── Helper: screen-space distance from centre ────────────────────────────────
+-- Returns screen-space distance from viewport centre + the screen Vector2
 local function screenDist(worldPos)
     local vp     = Camera.ViewportSize
     local centre = Vector2.new(vp.X / 2, vp.Y / 2)
     local sp, onScreen = Camera:WorldToViewportPoint(worldPos)
     if not onScreen then return math.huge, nil end
     local s2 = Vector2.new(sp.X, sp.Y)
-    return (s2 - centre).Magnitude, s2
+    return (s2 - centre).Magnitude, s2, centre
 end
 
--- ── Find nearest eligible target ─────────────────────────────────────────────
+-- ── Target selection ──────────────────────────────────────────────────────────
 local function findNearest()
     local localChar = LocalPlayer.Character
     local localRoot = getRoot(localChar)
     if not localRoot then return nil end
 
-    local origin      = localRoot.Position
-    local bestDist    = math.huge
-    local bestTarget  = nil
+    local origin   = localRoot.Position
+    local bestDist = math.huge
+    local best     = nil
 
     for _, player in ipairs(Players:GetPlayers()) do
         if player == LocalPlayer then continue end
-        if sameTeam(player) then continue end
+        if sameTeam(player)      then continue end
 
         local char = player.Character
         if not char then continue end
-
         local root = getRoot(char)
         if not root then continue end
 
-        -- Alive filter
         if cfg.filterAlive then
             local hum = getHumanoid(char)
             if not hum or hum.Health <= 0 then continue end
         end
 
-        -- Distance filter (world-space)
-        local worldDist = (root.Position - origin).Magnitude
-        if worldDist > cfg.maxDistance then continue end
+        if (root.Position - origin).Magnitude > cfg.maxDistance then continue end
 
-        -- Visibility filter
         if cfg.filterVisible and not isVisible(origin, root.Position, char) then continue end
 
-        -- Closest by screen-space distance from centre (within FOV circle)
-        local sDist, _ = screenDist(root.Position)
+        local sDist = screenDist(root.Position)
         if sDist < bestDist then
-            bestDist   = sDist
-            bestTarget = char
+            bestDist = sDist
+            best     = char
         end
     end
 
-    return bestTarget
+    return best
 end
 
--- ── Aim assist ───────────────────────────────────────────────────────────────
+-- ── Aim assist (mousemoverel) ─────────────────────────────────────────────────
+-- We deliberately avoid writing Camera.CFrame directly — that fights the game's
+-- camera scripts and produces the "doesn't work" symptom.  Instead we feed a
+-- relative mouse delta which the native camera controller picks up naturally.
 local function applyAssist(targetChar)
     if not targetChar then return end
     local root = getRoot(targetChar)
     if not root then return end
 
-    local sDist, sp = screenDist(root.Position)
+    local sDist, sp, centre = screenDist(root.Position)
     if not sp then return end
-    if sDist > cfg.fovRadius then return end   -- only inside FOV
+    if sDist > cfg.fovRadius then return end   -- only targets inside FOV
 
-    -- Move the camera CF slightly toward the target
-    local currentCF  = Camera.CFrame
-    local targetCF   = CFrame.new(currentCF.Position, root.Position)
-    Camera.CFrame    = currentCF:Lerp(targetCF, cfg.assistStrength)
+    -- Delta from screen centre to target, scaled by strength
+    local delta = (sp - centre)
+    local scale = (cfg.assistStrength / 100) * 0.4   -- tune: 0.4 max feels natural
+
+    local dx = delta.X * scale
+    local dy = delta.Y * scale
+
+    -- mousemoverel is provided by most Roblox executors
+    if mousemoverel then
+        mousemoverel(dx, dy)
+    end
 end
 
--- ── RenderStepped loop ───────────────────────────────────────────────────────
+-- ── RenderStepped ─────────────────────────────────────────────────────────────
 RunService.RenderStepped:Connect(function()
     if not cfg.enabled then
         fovCircle.Visible  = false
@@ -191,15 +186,12 @@ RunService.RenderStepped:Connect(function()
     local vp     = Camera.ViewportSize
     local centre = Vector2.new(vp.X / 2, vp.Y / 2)
 
-    -- FOV circle
-    fovCircle.Visible = cfg.showFOV
+    fovCircle.Visible  = cfg.showFOV
     fovCircle.Position = centre
     fovCircle.Radius   = cfg.fovRadius
 
-    -- Nearest target
     nearest = findNearest()
 
-    -- Target line
     if cfg.showLine and nearest then
         local root = getRoot(nearest)
         if root then
@@ -218,13 +210,12 @@ RunService.RenderStepped:Connect(function()
         targetLine.Visible = false
     end
 
-    -- Aim assist
     if cfg.aimAssist then
         applyAssist(nearest)
     end
 end)
 
--- ── Keybinds ─────────────────────────────────────────────────────────────────
+-- ── Keybinds ──────────────────────────────────────────────────────────────────
 UserInputService.InputBegan:Connect(function(input, gpe)
     if gpe then return end
     if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
@@ -238,43 +229,36 @@ UserInputService.InputBegan:Connect(function(input, gpe)
 
     elseif k == cfg.fovKey then
         cfg.showFOV = not cfg.showFOV
-        fovCircle.Visible = cfg.showFOV and cfg.enabled
 
     elseif k == cfg.assistKey then
         cfg.aimAssist = not cfg.aimAssist
-        if settingsUI then
-            local assistBtn = settingsUI:FindFirstChild("AssistToggle", true)
-            if assistBtn then
-                assistBtn.Text = "Aim Assist: " .. (cfg.aimAssist and "ON" or "OFF")
-                assistBtn.TextColor3 = cfg.aimAssist
-                    and Color3.fromRGB(100, 255, 100)
-                    or  Color3.fromRGB(255, 80, 80)
-            end
+        -- Update button label if the UI is already built
+        if assistBtn then
+            assistBtn.Text       = "Aim Assist: " .. (cfg.aimAssist and "ON" or "OFF")
+            assistBtn.TextColor3 = cfg.aimAssist
+                and Color3.fromRGB(100, 255, 100)
+                or  Color3.fromRGB(255, 80, 80)
         end
     end
 end)
 
--- ── Settings UI ──────────────────────────────────────────────────────────────
+-- ── Settings UI ───────────────────────────────────────────────────────────────
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name            = "AimTrainerUI"
-ScreenGui.ResetOnSpawn    = false
-ScreenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
-ScreenGui.IgnoreGuiInset  = true
-ScreenGui.Parent          = LocalPlayer.PlayerGui
+ScreenGui.Name           = "AimTrainerUI"
+ScreenGui.ResetOnSpawn   = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.Parent         = LocalPlayer.PlayerGui
 
--- Draggable frame
 local mainFrame = Instance.new("Frame")
-mainFrame.Name            = "Main"
-mainFrame.Size            = UDim2.new(0, 300, 0, 400)
-mainFrame.Position        = UDim2.new(0.5, -150, 0.5, -200)
+mainFrame.Name             = "Main"
+mainFrame.Size             = UDim2.new(0, 300, 0, 420)
+mainFrame.Position         = UDim2.new(0.5, -150, 0.5, -210)
 mainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
-mainFrame.BorderSizePixel = 0
-mainFrame.Visible         = false
-mainFrame.Parent          = ScreenGui
-
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 8)
-corner.Parent       = mainFrame
+mainFrame.BorderSizePixel  = 0
+mainFrame.Visible          = false
+mainFrame.Parent           = ScreenGui
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 8)
 
 -- Title bar
 local titleBar = Instance.new("Frame")
@@ -283,18 +267,15 @@ titleBar.Size              = UDim2.new(1, 0, 0, 36)
 titleBar.BackgroundColor3  = Color3.fromRGB(30, 30, 40)
 titleBar.BorderSizePixel   = 0
 titleBar.Parent            = mainFrame
+Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 8)
 
-local titleCorner = Instance.new("UICorner")
-titleCorner.CornerRadius = UDim.new(0, 8)
-titleCorner.Parent       = titleBar
-
--- Bottom cover for title bar rounded corners bleeding into content
+-- Cover the bottom-half rounded corners so they don't bleed into content
 local titleCover = Instance.new("Frame")
-titleCover.Size              = UDim2.new(1, 0, 0, 8)
-titleCover.Position          = UDim2.new(0, 0, 1, -8)
-titleCover.BackgroundColor3  = Color3.fromRGB(30, 30, 40)
-titleCover.BorderSizePixel   = 0
-titleCover.Parent            = titleBar
+titleCover.Size             = UDim2.new(1, 0, 0, 8)
+titleCover.Position         = UDim2.new(0, 0, 1, -8)
+titleCover.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+titleCover.BorderSizePixel  = 0
+titleCover.Parent           = titleBar
 
 local titleLabel = Instance.new("TextLabel")
 titleLabel.Text              = "⚙  Aim Trainer"
@@ -307,7 +288,6 @@ titleLabel.TextColor3        = Color3.fromRGB(220, 220, 255)
 titleLabel.TextXAlignment    = Enum.TextXAlignment.Left
 titleLabel.Parent            = titleBar
 
--- Close button
 local closeBtn = Instance.new("TextButton")
 closeBtn.Text              = "✕"
 closeBtn.Size              = UDim2.new(0, 28, 0, 28)
@@ -318,43 +298,41 @@ closeBtn.TextSize          = 13
 closeBtn.TextColor3        = Color3.fromRGB(255, 255, 255)
 closeBtn.BorderSizePixel   = 0
 closeBtn.Parent            = titleBar
-
-local closeBtnCorner = Instance.new("UICorner")
-closeBtnCorner.CornerRadius = UDim.new(0, 6)
-closeBtnCorner.Parent       = closeBtn
-
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
 closeBtn.MouseButton1Click:Connect(function()
     mainFrame.Visible = false
     uiOpen = false
 end)
 
--- Content scroll frame
+-- Scroll content
 local scroll = Instance.new("ScrollingFrame")
-scroll.Name              = "Content"
-scroll.Size              = UDim2.new(1, 0, 1, -36)
-scroll.Position          = UDim2.new(0, 0, 0, 36)
+scroll.Size                = UDim2.new(1, 0, 1, -36)
+scroll.Position            = UDim2.new(0, 0, 0, 36)
 scroll.BackgroundTransparency = 1
-scroll.BorderSizePixel   = 0
-scroll.ScrollBarThickness = 4
+scroll.BorderSizePixel     = 0
+scroll.ScrollBarThickness  = 4
 scroll.ScrollBarImageColor3 = Color3.fromRGB(80, 80, 120)
-scroll.CanvasSize        = UDim2.new(0, 0, 0, 0)  -- auto-sized below
 scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-scroll.Parent            = mainFrame
+scroll.CanvasSize          = UDim2.new(0, 0, 0, 0)
+scroll.Parent              = mainFrame
 
 local layout = Instance.new("UIListLayout")
-layout.Padding           = UDim.new(0, 6)
-layout.SortOrder         = Enum.SortOrder.LayoutOrder
-layout.Parent            = scroll
+layout.Padding    = UDim.new(0, 6)
+layout.SortOrder  = Enum.SortOrder.LayoutOrder
+layout.Parent     = scroll
 
-local padding = Instance.new("UIPadding")
-padding.PaddingTop    = UDim.new(0, 10)
-padding.PaddingLeft   = UDim.new(0, 12)
-padding.PaddingRight  = UDim.new(0, 12)
-padding.PaddingBottom = UDim.new(0, 10)
-padding.Parent        = scroll
+local pad = Instance.new("UIPadding")
+pad.PaddingTop    = UDim.new(0, 10)
+pad.PaddingLeft   = UDim.new(0, 12)
+pad.PaddingRight  = UDim.new(0, 12)
+pad.PaddingBottom = UDim.new(0, 10)
+pad.Parent        = scroll
 
--- ── UI helpers ───────────────────────────────────────────────────────────────
-local function makeLabel(text, order)
+-- ── UI factory helpers ────────────────────────────────────────────────────────
+local order = 0
+local function nextOrder() order += 1; return order end
+
+local function makeLabel(text)
     local lbl = Instance.new("TextLabel")
     lbl.Text              = text
     lbl.Size              = UDim2.new(1, 0, 0, 20)
@@ -363,61 +341,49 @@ local function makeLabel(text, order)
     lbl.TextSize          = 11
     lbl.TextColor3        = Color3.fromRGB(140, 140, 170)
     lbl.TextXAlignment    = Enum.TextXAlignment.Left
-    lbl.LayoutOrder       = order
+    lbl.LayoutOrder       = nextOrder()
     lbl.Parent            = scroll
     return lbl
 end
 
-local function makeToggle(labelText, getter, setter, order)
-    local btn = Instance.new("TextButton")
-    btn.Name              = labelText:gsub("%s", "") .. "Toggle"
-    btn.Size              = UDim2.new(1, 0, 0, 34)
-    btn.BackgroundColor3  = Color3.fromRGB(28, 28, 38)
-    btn.Font              = Enum.Font.Gotham
-    btn.TextSize          = 13
-    btn.BorderSizePixel   = 0
-    btn.LayoutOrder       = order
-    btn.Parent            = scroll
-
-    local bc = Instance.new("UICorner")
-    bc.CornerRadius = UDim.new(0, 6)
-    bc.Parent       = btn
-
-    local function refresh()
-        local on = getter()
-        btn.Text         = labelText .. ": " .. (on and "ON" or "OFF")
-        btn.TextColor3   = on and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 80, 80)
-    end
-    refresh()
-
-    btn.MouseButton1Click:Connect(function()
-        setter(not getter())
-        refresh()
-    end)
-    return btn
-end
-
-local function makeSeparator(order)
+local function makeSep()
     local sep = Instance.new("Frame")
     sep.Size             = UDim2.new(1, 0, 0, 1)
     sep.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
     sep.BorderSizePixel  = 0
-    sep.LayoutOrder      = order
+    sep.LayoutOrder      = nextOrder()
     sep.Parent           = scroll
-    return sep
 end
 
-local function makeSlider(labelText, min, max, getter, setter, order)
+local function makeToggle(label, getter, setter)
+    local btn = Instance.new("TextButton")
+    btn.Size             = UDim2.new(1, 0, 0, 34)
+    btn.BackgroundColor3 = Color3.fromRGB(28, 28, 38)
+    btn.Font             = Enum.Font.Gotham
+    btn.TextSize         = 13
+    btn.BorderSizePixel  = 0
+    btn.LayoutOrder      = nextOrder()
+    btn.Parent           = scroll
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+    local function refresh()
+        local on       = getter()
+        btn.Text       = label .. ": " .. (on and "ON" or "OFF")
+        btn.TextColor3 = on and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 80, 80)
+    end
+    refresh()
+    btn.MouseButton1Click:Connect(function() setter(not getter()); refresh() end)
+    return btn
+end
+
+local function makeSlider(label, minV, maxV, getter, setter)
     local container = Instance.new("Frame")
     container.Size             = UDim2.new(1, 0, 0, 56)
     container.BackgroundColor3 = Color3.fromRGB(28, 28, 38)
     container.BorderSizePixel  = 0
-    container.LayoutOrder      = order
+    container.LayoutOrder      = nextOrder()
     container.Parent           = scroll
-
-    local cc = Instance.new("UICorner")
-    cc.CornerRadius = UDim.new(0, 6)
-    cc.Parent       = container
+    Instance.new("UICorner", container).CornerRadius = UDim.new(0, 6)
 
     local lbl = Instance.new("TextLabel")
     lbl.Size              = UDim2.new(1, -10, 0, 22)
@@ -430,27 +396,19 @@ local function makeSlider(labelText, min, max, getter, setter, order)
     lbl.Parent            = container
 
     local track = Instance.new("Frame")
-    track.Name             = "Track"
     track.Size             = UDim2.new(1, -20, 0, 6)
     track.Position         = UDim2.new(0, 10, 0, 34)
     track.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
     track.BorderSizePixel  = 0
     track.Parent           = container
-
-    local trackCorner = Instance.new("UICorner")
-    trackCorner.CornerRadius = UDim.new(1, 0)
-    trackCorner.Parent       = track
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
 
     local fill = Instance.new("Frame")
-    fill.Name             = "Fill"
     fill.BackgroundColor3 = Color3.fromRGB(100, 100, 220)
     fill.BorderSizePixel  = 0
     fill.Size             = UDim2.new(0, 0, 1, 0)
     fill.Parent           = track
-
-    local fillCorner = Instance.new("UICorner")
-    fillCorner.CornerRadius = UDim.new(1, 0)
-    fillCorner.Parent       = fill
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
 
     local handle = Instance.new("Frame")
     handle.Size             = UDim2.new(0, 14, 0, 14)
@@ -459,177 +417,151 @@ local function makeSlider(labelText, min, max, getter, setter, order)
     handle.BorderSizePixel  = 0
     handle.ZIndex           = 2
     handle.Parent           = track
-
-    local handleCorner = Instance.new("UICorner")
-    handleCorner.CornerRadius = UDim.new(1, 0)
-    handleCorner.Parent       = handle
+    Instance.new("UICorner", handle).CornerRadius = UDim.new(1, 0)
 
     local function updateVisuals(val)
-        local t = math.clamp((val - min) / (max - min), 0, 1)
-        fill.Size          = UDim2.new(t, 0, 1, 0)
-        handle.Position    = UDim2.new(t, 0, 0.5, 0)
-        lbl.Text           = labelText .. ":  " .. tostring(math.round(val))
+        local t         = math.clamp((val - minV) / (maxV - minV), 0, 1)
+        fill.Size       = UDim2.new(t, 0, 1, 0)
+        handle.Position = UDim2.new(t, 0, 0.5, 0)
+        lbl.Text        = label .. ":  " .. tostring(math.round(val))
     end
     updateVisuals(getter())
 
-    -- Drag logic
     local dragging = false
-
     local function onDrag(input)
         local abs = track.AbsolutePosition
         local sz  = track.AbsoluteSize
         local rx  = math.clamp((input.Position.X - abs.X) / sz.X, 0, 1)
-        local val = math.round(min + rx * (max - min))
+        local val = math.round(minV + rx * (maxV - minV))
         setter(val)
         updateVisuals(val)
     end
-
-    track.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            onDrag(input)
+    track.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1
+        or inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; onDrag(inp)
         end
     end)
-
-    UserInputService.InputChanged:Connect(function(input)
+    UserInputService.InputChanged:Connect(function(inp)
         if not dragging then return end
-        if input.UserInputType == Enum.UserInputType.MouseMovement
-        or input.UserInputType == Enum.UserInputType.Touch then
-            onDrag(input)
+        if inp.UserInputType == Enum.UserInputType.MouseMovement
+        or inp.UserInputType == Enum.UserInputType.Touch then
+            onDrag(inp)
         end
     end)
-
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
+    UserInputService.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1
+        or inp.UserInputType == Enum.UserInputType.Touch then
             dragging = false
         end
     end)
-
     return container
 end
 
--- ── Build UI sections ─────────────────────────────────────────────────────────
-local o = 0
-local function next() o += 1; return o end
-
-makeLabel("GENERAL", next())
+-- ── Build UI ──────────────────────────────────────────────────────────────────
+makeLabel("GENERAL")
 makeToggle("Master Switch",
     function() return cfg.enabled end,
-    function(v) cfg.enabled = v end, next())
+    function(v) cfg.enabled = v end)
 
-makeSeparator(next())
-makeLabel("VISUALS", next())
+makeSep()
+makeLabel("VISUALS")
 makeToggle("Target Line",
     function() return cfg.showLine end,
-    function(v) cfg.showLine = v end, next())
+    function(v) cfg.showLine = v end)
 makeToggle("FOV Circle",
     function() return cfg.showFOV end,
-    function(v) cfg.showFOV = v end, next())
+    function(v) cfg.showFOV = v end)
 makeSlider("FOV Radius (px)", 20, 400,
     function() return cfg.fovRadius end,
-    function(v) cfg.fovRadius = v end, next())
+    function(v) cfg.fovRadius = v end)
 
-makeSeparator(next())
-makeLabel("AIM ASSIST", next())
-local assistToggle = makeToggle("Aim Assist",
+makeSep()
+makeLabel("AIM ASSIST")
+-- Store reference so the F3 keybind can update this button retroactively
+assistBtn = makeToggle("Aim Assist",
     function() return cfg.aimAssist end,
-    function(v) cfg.aimAssist = v end, next())
-assistToggle.Name = "AssistToggle"
+    function(v) cfg.aimAssist = v end)
 
-makeSlider("Assist Strength (%)", 1, 100,
-    function() return math.round(cfg.assistStrength * 100) end,
-    function(v) cfg.assistStrength = v / 100 end, next())
+makeSlider("Assist Strength", 1, 20,
+    function() return cfg.assistStrength end,
+    function(v) cfg.assistStrength = v end)
 
-makeSeparator(next())
-makeLabel("TARGET FILTERS", next())
+makeSep()
+makeLabel("TARGET FILTERS")
 makeToggle("Skip Same Team",
     function() return cfg.filterTeam end,
-    function(v) cfg.filterTeam = v end, next())
+    function(v) cfg.filterTeam = v end)
 makeToggle("Skip Behind Walls",
     function() return cfg.filterVisible end,
-    function(v) cfg.filterVisible = v end, next())
+    function(v) cfg.filterVisible = v end)
 makeToggle("Skip Dead Players",
     function() return cfg.filterAlive end,
-    function(v) cfg.filterAlive = v end, next())
+    function(v) cfg.filterAlive = v end)
 makeSlider("Max Distance (st)", 50, 1000,
     function() return cfg.maxDistance end,
-    function(v) cfg.maxDistance = v end, next())
+    function(v) cfg.maxDistance = v end)
 
-makeSeparator(next())
-makeLabel("KEYBINDS  (non-game input only)", next())
-makeLabel("  RightAlt  — open/close UI", next())
-makeLabel("  F1  — toggle line", next())
-makeLabel("  F2  — toggle FOV circle", next())
-makeLabel("  F3  — toggle aim assist", next())
+makeSep()
+makeLabel("KEYBINDS  (non-game input only)")
+makeLabel("  RightAlt  — open/close UI")
+makeLabel("  F1  — toggle line")
+makeLabel("  F2  — toggle FOV circle")
+makeLabel("  F3  — toggle aim assist")
 
 -- ── Draggable title bar ───────────────────────────────────────────────────────
 do
     local dragging, dragStart, startPos
-    titleBar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+    titleBar.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging  = true
-            dragStart = input.Position
+            dragStart = inp.Position
             startPos  = mainFrame.Position
         end
     end)
-    UserInputService.InputChanged:Connect(function(input)
-        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-            local delta = input.Position - dragStart
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
+            local d = inp.Position - dragStart
             mainFrame.Position = UDim2.new(
-                startPos.X.Scale, startPos.X.Offset + delta.X,
-                startPos.Y.Scale, startPos.Y.Offset + delta.Y
-            )
+                startPos.X.Scale, startPos.X.Offset + d.X,
+                startPos.Y.Scale, startPos.Y.Offset + d.Y)
         end
     end)
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+    UserInputService.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = false
         end
     end)
 end
 
--- ── Toggle UI open/close (RightAlt) ──────────────────────────────────────────
--- (Also bound in the InputBegan handler above; this keeps it clean)
+-- ── RightAlt opens/closes the panel ──────────────────────────────────────────
 UserInputService.InputBegan:Connect(function(input, gpe)
     if gpe then return end
     if input.UserInputType == Enum.UserInputType.Keyboard
     and input.KeyCode == cfg.toggleKey then
         uiOpen = not uiOpen
         mainFrame.Visible = uiOpen
-        if uiOpen then
-            TweenService:Create(mainFrame, TweenInfo.new(0.15), {
-                BackgroundTransparency = 0
-            }):Play()
-        end
     end
 end)
 
--- ── Debug console helper ──────────────────────────────────────────────────────
--- Call AimTrainer.debug() from the executor console to dump live state
+-- ── Debug helper ─────────────────────────────────────────────────────────────
 _G.AimTrainer = {
     cfg     = cfg,
     nearest = function() return nearest end,
     debug   = function()
         print("── AimTrainer debug ──")
-        print("  enabled:       ", cfg.enabled)
-        print("  showLine:      ", cfg.showLine)
-        print("  showFOV:       ", cfg.showFOV)
-        print("  aimAssist:     ", cfg.aimAssist)
-        print("  fovRadius:     ", cfg.fovRadius)
-        print("  assistStrength:", cfg.assistStrength)
-        print("  maxDistance:   ", cfg.maxDistance)
-        print("  filterTeam:    ", cfg.filterTeam)
-        print("  filterVisible: ", cfg.filterVisible)
-        print("  filterAlive:   ", cfg.filterAlive)
+        for k, v in pairs(cfg) do
+            if type(v) ~= "function" then
+                print(string.format("  %-20s %s", k, tostring(v)))
+            end
+        end
         if nearest then
-            local root = getRoot(nearest)
-            print("  nearest:       ", nearest.Name, root and root.Position or "no root")
+            local r = getRoot(nearest)
+            print("  nearest:", nearest.Name, r and tostring(r.Position) or "no root")
         else
-            print("  nearest:        nil")
+            print("  nearest: nil")
         end
     end,
 }
 
-print("[AimTrainer] Loaded. Press RightAlt to open settings.")
+print("[AimTrainer] Loaded — press RightAlt to open settings.")
