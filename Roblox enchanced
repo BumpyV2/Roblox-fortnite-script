@@ -30,6 +30,8 @@ local cfg = {
         HitChance = 100,
         TeamCheck = true,          -- skips models in your party
         WallCheck = true,
+        Wallbang = false,          -- fire through walls: moves the ray origin up next to the target
+        WallbangBack = 4,          -- studs in front of the target the ray starts from
         MaxDistance = 1500,
         TargetBots = true,
         TargetPlayers = true,
@@ -37,16 +39,10 @@ local cfg = {
         AutoFireRadius = 35,       -- px from crosshair
     },
     Weapon = {
-        InfiniteAmmo = false,      -- client-only refill; server drops shots once its own count hits 0
-        InstantReload = true,      -- the real "infinite ammo": refills the mag via the game's own reload packet
-        ReloadDelay = 0.1,         -- seconds after the mag empties before the instant refill; raise it if
-                                   -- shots stop registering (server may enforce a minimum reload time)
         NoRecoil = true,
         NoSpread = true,
         NoCooldown = false,        -- client-side cooldown only; server may still gate
         FireRateScale = 1,         -- <1 = faster auto-fire interval
-        BatchRays = false,         -- pack several shots into one packet so the server charges one round for them
-        RaysPerPacket = 2,         -- shots per packet; raise until hits stop registering, then step back
     },
     Visuals = {
         ESP = true,
@@ -255,10 +251,16 @@ do
         if cfg.Aim.SilentAim and t and t.Parent and math.random(100) <= cfg.Aim.HitChance then
             local part = pickPart(t)
             if part then
-                local dir = part.Position - ray.Origin
+                local origin = ray.Origin
+                local dir = part.Position - origin
+                local back = cfg.Aim.WallbangBack
+                if cfg.Aim.Wallbang and dir.Magnitude > back and not visible(part, t) then
+                    origin = part.Position - dir.Unit * back       -- start the ray on the near side of the target
+                    dir = part.Position - origin
+                end
                 if dir.Magnitude > 0 then
                     S.redirected += 1
-                    return Ray.new(ray.Origin, dir.Unit * ray.Direction.Magnitude)
+                    return Ray.new(origin, dir.Unit * ray.Direction.Magnitude)
                 end
             end
         end
@@ -296,58 +298,6 @@ if Weapon then
         if S.alive and type(r) == "number" then return r * cfg.Weapon.FireRateScale end
         return r
     end, "Weapon.GetAutoAttackInterval")
-end
-
--- 4) ray batching: N shots leave as ONE packet, so the server spends one round on them
-do
-    local okN, Net = pcall(function() return require(RS.Shared.Net) end)
-    local pk = okN and type(Net) == "table" and Net.packets and Net.packets.yrYHrb8mHa5K2uY8
-    if pk and type(pk.send) == "function" then
-        local origSend = pk.send
-        local pend, pendN, gen = nil, 0, 0
-        local function equipped()
-            local ok, eq = pcall(WC.getEquipped)
-            if ok and type(eq) == "table" and type(eq.Ammo) == "number" then return eq end
-        end
-        local function flush(fromTimer)
-            if not pend then return end
-            local pkt = pend
-            pend, pendN = nil, 0
-            if fromTimer then                      -- buffered shots were refunded; charge the one packet
-                local eq = equipped()
-                if eq then eq.Ammo = math.max(0, eq.Ammo - 1) end
-            end
-            pcall(origSend, pkt)
-        end
-        pk.send = function(pkt, ...)
-            local n = cfg.Weapon.RaysPerPacket
-            if not (S.alive and cfg.Weapon.BatchRays) or n <= 1 or type(pkt) ~= "table"
-               or pkt.isQuickAttack or type(pkt.MkCaVZOOGgaQIGqs) ~= "table" then
-                flush(false)
-                return origSend(pkt, ...)
-            end
-            if pend then
-                for _, r in ipairs(pkt.MkCaVZOOGgaQIGqs) do table.insert(pend.MkCaVZOOGgaQIGqs, r) end
-                pend.requestTime, pend.vfxOrigin = pkt.requestTime, pkt.vfxOrigin
-            else
-                pend = pkt
-            end
-            pendN += 1
-            if pendN >= n then
-                flush(false)                       -- this shot already cost the round the packet is charged
-                S.batched = (S.batched or 0) + 1
-                return
-            end
-            local eq = equipped()                  -- not sent yet: give the round back
-            if eq then eq.Ammo += 1 end
-            gen += 1
-            local mine = gen
-            task.delay(0.2, function() if gen == mine then flush(true) end end)
-        end
-        S.unbatch = function() flush(true); pk.send = origSend end
-    else
-        warn("[hub] shot packet not found; ray batching disabled")
-    end
 end
 
 ----------------------------------------------------------------------
@@ -521,6 +471,8 @@ slider(tAim, "Hit chance %", cfg.Aim, "HitChance", 1, 100, 1)
 slider(tAim, "Max distance", cfg.Aim, "MaxDistance", 50, 5000, 50)
 toggle(tAim, "Team check (party)", cfg.Aim, "TeamCheck")
 toggle(tAim, "Wall check", cfg.Aim, "WallCheck")
+toggle(tAim, "Wallbang (experimental)", cfg.Aim, "Wallbang")
+slider(tAim, "Wallbang distance (studs)", cfg.Aim, "WallbangBack", 1, 40, 1)
 toggle(tAim, "Target bots", cfg.Aim, "TargetBots")
 toggle(tAim, "Target players", cfg.Aim, "TargetPlayers")
 section(tAim, "Auto-fire")
@@ -529,14 +481,9 @@ slider(tAim, "Auto-fire radius (px)", cfg.Aim, "AutoFireRadius", 5, 150, 1)
 
 -- Weapon tab
 local tWep = newTab("Weapon")
-toggle(tWep, "Infinite ammo", cfg.Weapon, "InfiniteAmmo")
-toggle(tWep, "Instant reload", cfg.Weapon, "InstantReload")
-slider(tWep, "Reload delay (s)", cfg.Weapon, "ReloadDelay", 0, 2, 0.05)
 toggle(tWep, "No recoil / shake", cfg.Weapon, "NoRecoil")
 toggle(tWep, "No spread", cfg.Weapon, "NoSpread")
 toggle(tWep, "No cooldown (client)", cfg.Weapon, "NoCooldown")
-toggle(tWep, "Batch rays (experimental)", cfg.Weapon, "BatchRays")
-slider(tWep, "Rays per packet", cfg.Weapon, "RaysPerPacket", 2, 5, 1)
 slider(tWep, "Fire interval scale", cfg.Weapon, "FireRateScale", 0.2, 1, 0.05)
 
 -- Visuals tab
@@ -675,7 +622,7 @@ conns[#conns + 1] = RunService.RenderStepped:Connect(function()
                 local sp, vis = camera:WorldToViewportPoint(part.Position)
                 if vis and sp.Z > 0 then
                     local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
-                    if d < bestD and (not A.WallCheck or visible(part, m)) then best, bestD = m, d end
+                    if d < bestD and (not A.WallCheck or A.Wallbang or visible(part, m)) then best, bestD = m, d end
                 end
             end
         end
@@ -691,7 +638,6 @@ end)
 -- slide / knocked) and eases Humanoid.JumpHeight (not JumpPower) back after every jump. So we track
 -- the "natural" value the game last wrote and re-apply natural * mult on top of it each frame.
 local nat, last, lastHum = {}, {}, nil
-local emptySince = nil
 local function applyMod(hum, prop, on, mult, cap)
     local cur = hum[prop]
     if last[prop] == nil or math.abs(cur - last[prop]) > 1e-3 then nat[prop] = cur end   -- game changed it
@@ -710,37 +656,6 @@ local function restoreMods(hum)
 end
 
 conns[#conns + 1] = RunService.Heartbeat:Connect(function()
-    -- infinite ammo: refill the equipped weapon's client counter
-    if cfg.Weapon.InfiniteAmmo and WC then
-        local ok, eq = pcall(WC.getEquipped)
-        S.equipped = ok and type(eq) == "table"
-        if S.equipped and eq.Config and eq.Config.Ammo and type(eq.Ammo) == "number" then
-            local mag = eq.Config.Ammo.MagazineSize
-            if mag and eq.Ammo < mag then
-                if pcall(function() eq.Ammo = mag end) then S.refills = (S.refills or 0) + 1 end
-            end
-        end
-    end
-    -- Instant reload: the server counts ammo, so a client-side lock just gets shots dropped. Instead run
-    -- the game's own reload (Reload -> FinishReload) back to back; FinishReload sends the real
-    -- "reload finished" packet, so client and server counts stay in sync.
-    if cfg.Weapon.InstantReload and WC then
-        local ok, eq = pcall(WC.getEquipped)
-        if ok and type(eq) == "table" and eq.Config and eq.Config.Ammo and type(eq.Ammo) == "number" then
-            if eq.Ammo <= 0 then
-                emptySince = emptySince or os.clock()
-                if os.clock() - emptySince >= cfg.Weapon.ReloadDelay then
-                    pcall(eq.Reload, eq)
-                    if eq.ReloadThread then pcall(task.cancel, eq.ReloadThread); eq.ReloadThread = nil end
-                    pcall(eq.FinishReload, eq)
-                    emptySince = nil
-                    S.instantReloads = (S.instantReloads or 0) + 1
-                end
-            else
-                emptySince = nil
-            end
-        end
-    end
     local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
     if hum ~= lastHum then nat, last, lastHum = {}, {}, hum end
     if hum then
@@ -786,7 +701,6 @@ end)
 
 function Unload()
     S.alive = false                       -- every hook passes straight through from here on
-    if S.unbatch then pcall(S.unbatch) end
     setFire(false)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for _, h in ipairs(hooks) do
