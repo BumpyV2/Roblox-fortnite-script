@@ -496,7 +496,7 @@ local tWep = newTab("Weapon")
 toggle(tWep, "No recoil / shake", cfg.Weapon, "NoRecoil")
 toggle(tWep, "No spread", cfg.Weapon, "NoSpread")
 toggle(tWep, "No cooldown (client)", cfg.Weapon, "NoCooldown")
-slider(tWep, "Fire interval scale", cfg.Weapon, "FireRateScale", 0.2, 1, 0.05)
+slider(tWep, "Fire interval scale", cfg.Weapon, "FireRateScale", 0.1, 1, 0.05)
 
 -- Visuals tab
 local tVis = newTab("Visuals")
