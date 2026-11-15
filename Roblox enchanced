@@ -136,9 +136,21 @@ local function isBot(m)
     local u = m:GetAttribute("UserId")
     return type(u) == "number" and u < 0
 end
+-- Teammate = same party, or same match team (TDM sets Team=Blue/Red on you and on every model;
+-- real players carry it on the Player object). "Player" is the free-for-all label, not a team.
+local function teamOf(m)
+    local t = m:GetAttribute("Team")
+    if t == nil then
+        local p = Players:GetPlayerFromCharacter(m)
+        t = p and p:GetAttribute("Team")
+    end
+    return t
+end
 local function isTeam(m)
-    local p = lp:GetAttribute("Party")
-    return p ~= nil and m:GetAttribute("Party") == p
+    local party = lp:GetAttribute("Party")
+    if party ~= nil and m:GetAttribute("Party") == party then return true end
+    local mine, theirs = lp:GetAttribute("Team"), teamOf(m)
+    return theirs ~= nil and theirs ~= "Player" and theirs == mine
 end
 
 local function newDraw(class, props)
