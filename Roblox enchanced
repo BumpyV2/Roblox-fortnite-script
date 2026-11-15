@@ -679,6 +679,12 @@ local function applyMod(hum, prop, on, mult, cap)
         last[prop] = nil
     end
 end
+local flyBV
+local function stopFly(hum)
+    S.flying = false
+    if flyBV then pcall(function() flyBV:Destroy() end); flyBV = nil end
+    if hum then pcall(function() hum.PlatformStand = false end) end
+end
 local function restoreMods(hum)
     for prop in pairs(last) do pcall(function() hum[prop] = nat[prop] end) end
     last = {}
@@ -691,21 +697,33 @@ conns[#conns + 1] = RunService.Heartbeat:Connect(function()
         local M = cfg.Misc
         applyMod(hum, "WalkSpeed", M.Speed, M.SpeedMult, M.SpeedCap)
         applyMod(hum, hum.UseJumpPower and "JumpPower" or "JumpHeight", M.Jump, M.JumpMult, M.JumpCap)
-        -- fly: drive the root part's velocity from the camera + WASD; zero it when no key is held
+        -- fly: a BodyVelocity with huge force holds the root part at the commanded velocity, so releasing
+        -- every key hovers; PlatformStand stops the humanoid's own movement/fall states from fighting it
         local hrp = hum.RootPart
-        if M.Fly and hrp and hum.Health > 0 and not UIS:GetFocusedTextBox() then
-            local cf = workspace.CurrentCamera.CFrame
+        if M.Fly and hrp and hum.Health > 0 then
+            if not flyBV or flyBV.Parent ~= hrp then
+                if flyBV then flyBV:Destroy() end
+                flyBV = Instance.new("BodyVelocity")
+                flyBV.MaxForce = Vector3.one * 1e9
+                flyBV.P = 1e5
+                flyBV.Velocity = Vector3.zero
+                flyBV.Parent = hrp
+            end
+            hum.PlatformStand = true
             local v = Vector3.zero
-            if UIS:IsKeyDown(Enum.KeyCode.W) then v += cf.LookVector end
-            if UIS:IsKeyDown(Enum.KeyCode.S) then v -= cf.LookVector end
-            if UIS:IsKeyDown(Enum.KeyCode.D) then v += cf.RightVector end
-            if UIS:IsKeyDown(Enum.KeyCode.A) then v -= cf.RightVector end
-            if UIS:IsKeyDown(Enum.KeyCode.Space) then v += Vector3.yAxis end
-            if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then v -= Vector3.yAxis end
-            hrp.AssemblyLinearVelocity = (v.Magnitude > 0) and v.Unit * M.FlySpeed or Vector3.zero
+            if not UIS:GetFocusedTextBox() then
+                local cf = workspace.CurrentCamera.CFrame
+                if UIS:IsKeyDown(Enum.KeyCode.W) then v += cf.LookVector end
+                if UIS:IsKeyDown(Enum.KeyCode.S) then v -= cf.LookVector end
+                if UIS:IsKeyDown(Enum.KeyCode.D) then v += cf.RightVector end
+                if UIS:IsKeyDown(Enum.KeyCode.A) then v -= cf.RightVector end
+                if UIS:IsKeyDown(Enum.KeyCode.Space) then v += Vector3.yAxis end
+                if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then v -= Vector3.yAxis end
+            end
+            flyBV.Velocity = (v.Magnitude > 0) and v.Unit * M.FlySpeed or Vector3.zero
             S.flying = true
         elseif S.flying then
-            S.flying = false
+            stopFly(hum)
         end
     end
 end)
@@ -753,6 +771,7 @@ function Unload()
     end
     for m in pairs(objects) do clearObj(m) end
     for _, d in ipairs(drawings) do removeDraw(d) end
+    stopFly(lastHum)
     if lastHum then restoreMods(lastHum) end
     gui:Destroy()
     chamFolder:Destroy()
