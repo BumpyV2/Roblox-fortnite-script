@@ -227,17 +227,21 @@ end
 --    The exported wrapper exposes no upvalues in this executor, so find the real local by
 --    name + source + line (confirmed against the decompile: Weapon module, line 73).
 do
-    local aimFn
+    -- The game keeps several live copies of this function (the module gets loaded more than once),
+    -- and only one is actually used, so hook every copy.
+    local aimFns = {}
     for _, f in ipairs(getgc()) do
         if type(f) == "function" and islclosure(f) then
             local okn, n = pcall(debug.info, f, "n")
             if okn and n == "WRZqzZaZR99w2Lga" then
                 local _, l = pcall(debug.info, f, "l")
                 local _, s = pcall(debug.info, f, "s")
-                if l == 73 and tostring(s):find("Weapon$") then aimFn = f break end
+                if l == 73 and tostring(s):find("Weapon$") then aimFns[#aimFns + 1] = f end
             end
         end
     end
+    if #aimFns == 0 then warn("[hub] shot-ray function not found; silent aim / no spread disabled") end
+    for _, aimFn in ipairs(aimFns) do
     local orig
     orig = hook(aimFn, function(a1, a2)
         if not S.alive then return orig(a1, a2) end
@@ -256,6 +260,7 @@ do
         end
         return ray
     end, "WRZq shot ray")
+    end
 end
 
 -- 2) no recoil
