@@ -38,7 +38,9 @@ local cfg = {
     },
     Weapon = {
         InfiniteAmmo = false,      -- client-only refill; server drops shots once its own count hits 0
-        AutoReload = true,         -- calls the game's real Reload when the mag is empty
+        InstantReload = true,      -- the real "infinite ammo": refills the mag via the game's own reload packet
+        ReloadDelay = 0.1,         -- seconds after the mag empties before the instant refill; raise it if
+                                   -- shots stop registering (server may enforce a minimum reload time)
         NoRecoil = true,
         NoSpread = true,
         NoCooldown = false,        -- client-side cooldown only; server may still gate
@@ -474,7 +476,8 @@ slider(tAim, "Auto-fire radius (px)", cfg.Aim, "AutoFireRadius", 5, 150, 1)
 -- Weapon tab
 local tWep = newTab("Weapon")
 toggle(tWep, "Infinite ammo", cfg.Weapon, "InfiniteAmmo")
-toggle(tWep, "Auto reload", cfg.Weapon, "AutoReload")
+toggle(tWep, "Instant reload", cfg.Weapon, "InstantReload")
+slider(tWep, "Reload delay (s)", cfg.Weapon, "ReloadDelay", 0, 2, 0.05)
 toggle(tWep, "No recoil / shake", cfg.Weapon, "NoRecoil")
 toggle(tWep, "No spread", cfg.Weapon, "NoSpread")
 toggle(tWep, "No cooldown (client)", cfg.Weapon, "NoCooldown")
@@ -632,6 +635,7 @@ end)
 -- slide / knocked) and eases Humanoid.JumpHeight (not JumpPower) back after every jump. So we track
 -- the "natural" value the game last wrote and re-apply natural * mult on top of it each frame.
 local nat, last, lastHum = {}, {}, nil
+local emptySince = nil
 local function applyMod(hum, prop, on, mult, cap)
     local cur = hum[prop]
     if last[prop] == nil or math.abs(cur - last[prop]) > 1e-3 then nat[prop] = cur end   -- game changed it
@@ -661,11 +665,24 @@ conns[#conns + 1] = RunService.Heartbeat:Connect(function()
             end
         end
     end
-    if cfg.Weapon.AutoReload and WC then
+    -- Instant reload: the server counts ammo, so a client-side lock just gets shots dropped. Instead run
+    -- the game's own reload (Reload -> FinishReload) back to back; FinishReload sends the real
+    -- "reload finished" packet, so client and server counts stay in sync.
+    if cfg.Weapon.InstantReload and WC then
         local ok, eq = pcall(WC.getEquipped)
-        if ok and type(eq) == "table" and eq.Config and eq.Config.Ammo
-            and type(eq.Ammo) == "number" and eq.Ammo <= 0 then
-            pcall(eq.Reload, eq)   -- game guards against double reloads itself
+        if ok and type(eq) == "table" and eq.Config and eq.Config.Ammo and type(eq.Ammo) == "number" then
+            if eq.Ammo <= 0 then
+                emptySince = emptySince or os.clock()
+                if os.clock() - emptySince >= cfg.Weapon.ReloadDelay then
+                    pcall(eq.Reload, eq)
+                    if eq.ReloadThread then pcall(task.cancel, eq.ReloadThread); eq.ReloadThread = nil end
+                    pcall(eq.FinishReload, eq)
+                    emptySince = nil
+                    S.instantReloads = (S.instantReloads or 0) + 1
+                end
+            else
+                emptySince = nil
+            end
         end
     end
     local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
