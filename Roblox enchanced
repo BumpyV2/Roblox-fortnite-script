@@ -30,6 +30,7 @@ local cfg = {
         HitChance = 100,
         TeamCheck = true,          -- skips models in your party
         WallCheck = true,
+        Hitscan = false,           -- start every shot's ray next to the target, so the bullet's travel time is ~0
         Wallbang = true,          -- fire through walls: moves the ray origin up next to the target
         WallbangMode = "Near target",   -- "Near target" | "Past wall"
         WallbangBack = 4,          -- studs in front of the target the ray starts from
@@ -257,7 +258,7 @@ do
                 local origin = ray.Origin
                 local dir = part.Position - origin
                 local back = cfg.Aim.WallbangBack
-                if cfg.Aim.Wallbang and dir.Magnitude > back and not visible(part, t) then
+                if dir.Magnitude > back and (cfg.Aim.Hitscan or (cfg.Aim.Wallbang and not visible(part, t))) then
                     local u = dir.Unit
                     local o
                     if cfg.Aim.WallbangMode == "Past wall" then
@@ -497,6 +498,7 @@ slider(tAim, "Hit chance %", cfg.Aim, "HitChance", 1, 100, 1)
 slider(tAim, "Max distance", cfg.Aim, "MaxDistance", 50, 5000, 50)
 toggle(tAim, "Team check (party)", cfg.Aim, "TeamCheck")
 toggle(tAim, "Wall check", cfg.Aim, "WallCheck")
+toggle(tAim, "Hitscan (instant bullets)", cfg.Aim, "Hitscan")
 toggle(tAim, "Wallbang (experimental)", cfg.Aim, "Wallbang")
 cycle(tAim, "Wallbang origin", cfg.Aim, "WallbangMode", {"Near target", "Past wall"})
 slider(tAim, "Wallbang distance (studs)", cfg.Aim, "WallbangBack", 1, 40, 1)
