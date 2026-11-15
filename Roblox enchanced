@@ -31,6 +31,7 @@ local cfg = {
         TeamCheck = true,          -- skips models in your party
         WallCheck = true,
         Wallbang = true,          -- fire through walls: moves the ray origin up next to the target
+        WallbangMode = "Near target",   -- "Near target" | "Past wall"
         WallbangBack = 4,          -- studs in front of the target the ray starts from
         MaxDistance = math.huge,   -- no range limit on targeting (slider caps at 5000 when touched)
         TargetBots = true,
@@ -255,7 +256,17 @@ do
                 local dir = part.Position - origin
                 local back = cfg.Aim.WallbangBack
                 if cfg.Aim.Wallbang and dir.Magnitude > back and not visible(part, t) then
-                    origin = part.Position - dir.Unit * back       -- start the ray on the near side of the target
+                    local u = dir.Unit
+                    local o
+                    if cfg.Aim.WallbangMode == "Past wall" then
+                        -- start just behind the first wall instead of next to the target, so the origin
+                        -- stays as close to you as the wall is (the server may cap origin distance)
+                        local rp = RaycastParams.new()
+                        rp.FilterDescendantsInstances = {lp.Character, t}
+                        local hit = workspace:Raycast(part.Position, -dir, rp)
+                        if hit then o = hit.Position + u * 1.5 end
+                    end
+                    origin = o or (part.Position - u * back)
                     dir = part.Position - origin
                 end
                 if dir.Magnitude > 0 then
@@ -472,6 +483,7 @@ slider(tAim, "Max distance", cfg.Aim, "MaxDistance", 50, 5000, 50)
 toggle(tAim, "Team check (party)", cfg.Aim, "TeamCheck")
 toggle(tAim, "Wall check", cfg.Aim, "WallCheck")
 toggle(tAim, "Wallbang (experimental)", cfg.Aim, "Wallbang")
+cycle(tAim, "Wallbang origin", cfg.Aim, "WallbangMode", {"Near target", "Past wall"})
 slider(tAim, "Wallbang distance (studs)", cfg.Aim, "WallbangBack", 1, 40, 1)
 toggle(tAim, "Target bots", cfg.Aim, "TargetBots")
 toggle(tAim, "Target players", cfg.Aim, "TargetPlayers")
