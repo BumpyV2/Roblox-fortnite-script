@@ -37,7 +37,8 @@ local cfg = {
         AutoFireRadius = 35,       -- px from crosshair
     },
     Weapon = {
-        InfiniteAmmo = true,
+        InfiniteAmmo = false,      -- client-only refill; server drops shots once its own count hits 0
+        AutoReload = true,         -- calls the game's real Reload when the mag is empty
         NoRecoil = true,
         NoSpread = true,
         NoCooldown = false,        -- client-side cooldown only; server may still gate
@@ -456,6 +457,7 @@ slider(tAim, "Auto-fire radius (px)", cfg.Aim, "AutoFireRadius", 5, 150, 1)
 -- Weapon tab
 local tWep = newTab("Weapon")
 toggle(tWep, "Infinite ammo", cfg.Weapon, "InfiniteAmmo")
+toggle(tWep, "Auto reload", cfg.Weapon, "AutoReload")
 toggle(tWep, "No recoil / shake", cfg.Weapon, "NoRecoil")
 toggle(tWep, "No spread", cfg.Weapon, "NoSpread")
 toggle(tWep, "No cooldown (client)", cfg.Weapon, "NoCooldown")
@@ -640,6 +642,13 @@ conns[#conns + 1] = RunService.Heartbeat:Connect(function()
             if mag and eq.Ammo < mag then
                 if pcall(function() eq.Ammo = mag end) then S.refills = (S.refills or 0) + 1 end
             end
+        end
+    end
+    if cfg.Weapon.AutoReload and WC then
+        local ok, eq = pcall(WC.getEquipped)
+        if ok and type(eq) == "table" and eq.Config and eq.Config.Ammo
+            and type(eq.Ammo) == "number" and eq.Ammo <= 0 then
+            pcall(eq.Reload, eq)   -- game guards against double reloads itself
         end
     end
     local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
