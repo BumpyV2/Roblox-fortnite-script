@@ -65,6 +65,8 @@ local cfg = {
         Jump = false,
         JumpMult = 1.2,
         JumpCap = 1.5,
+        Fly = false,
+        FlySpeed = 60,             -- studs/s. WASD = move on the camera plane, Space = up, LeftCtrl = down
     },
     Keys = { Menu = "RightShift", Unload = "End" },
     -- per-option binds, keyed by the row label in the UI. Click the [bind] chip on any
@@ -299,9 +301,22 @@ end
 -- 3) cooldown / fire rate (client-side checks only)
 if Weapon then
     local oc
-    oc = hook(Weapon.UpdateCooldown, function(self, ...)
-        if S.alive and cfg.Weapon.NoCooldown then return true end
-        return oc(self, ...)
+    local lastShot = {}
+    oc = hook(Weapon.UpdateCooldown, function(self, a2)
+        if S.alive then
+            if cfg.Weapon.NoCooldown then return true end
+            -- the game's own gate uses Config.General.AttackInterval, so scaling GetAutoAttackInterval alone
+            -- changes nothing: apply the scale to that gate too
+            local sc = cfg.Weapon.FireRateScale
+            if sc < 1 and type(self) == "table" and self.Config and self.Config.General and self.Config.General.AttackInterval then
+                local id = self.WeaponInfo and self.WeaponInfo.Id or "?"
+                local now = os.clock()
+                if now - (lastShot[id] or 0) < self.Config.General.AttackInterval * sc * 0.98 then return false end
+                lastShot[id] = now
+                return true
+            end
+        end
+        return oc(self, a2)
     end, "Weapon.UpdateCooldown")
     local oi
     oi = hook(Weapon.GetAutoAttackInterval, function(self, ...)
@@ -515,6 +530,8 @@ toggle(tMisc, "Speed modifier", cfg.Misc, "Speed")
 slider(tMisc, "Speed multiplier", cfg.Misc, "SpeedMult", 1, cfg.Misc.SpeedCap, 0.05)
 toggle(tMisc, "Jump modifier", cfg.Misc, "Jump")
 slider(tMisc, "Jump multiplier", cfg.Misc, "JumpMult", 1, cfg.Misc.JumpCap, 0.05)
+toggle(tMisc, "Fly", cfg.Misc, "Fly")
+slider(tMisc, "Fly speed", cfg.Misc, "FlySpeed", 10, 300, 5)
 section(tMisc, "Fixed keys (click to rebind)")
 keybind(tMisc, "Menu", "Menu")
 keybind(tMisc, "Unload", "Unload")
@@ -674,6 +691,22 @@ conns[#conns + 1] = RunService.Heartbeat:Connect(function()
         local M = cfg.Misc
         applyMod(hum, "WalkSpeed", M.Speed, M.SpeedMult, M.SpeedCap)
         applyMod(hum, hum.UseJumpPower and "JumpPower" or "JumpHeight", M.Jump, M.JumpMult, M.JumpCap)
+        -- fly: drive the root part's velocity from the camera + WASD; zero it when no key is held
+        local hrp = hum.RootPart
+        if M.Fly and hrp and hum.Health > 0 and not UIS:GetFocusedTextBox() then
+            local cf = workspace.CurrentCamera.CFrame
+            local v = Vector3.zero
+            if UIS:IsKeyDown(Enum.KeyCode.W) then v += cf.LookVector end
+            if UIS:IsKeyDown(Enum.KeyCode.S) then v -= cf.LookVector end
+            if UIS:IsKeyDown(Enum.KeyCode.D) then v += cf.RightVector end
+            if UIS:IsKeyDown(Enum.KeyCode.A) then v -= cf.RightVector end
+            if UIS:IsKeyDown(Enum.KeyCode.Space) then v += Vector3.yAxis end
+            if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then v -= Vector3.yAxis end
+            hrp.AssemblyLinearVelocity = (v.Magnitude > 0) and v.Unit * M.FlySpeed or Vector3.zero
+            S.flying = true
+        elseif S.flying then
+            S.flying = false
+        end
     end
 end)
 
