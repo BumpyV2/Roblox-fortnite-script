@@ -30,9 +30,9 @@ local cfg = {
         HitChance = 100,
         TeamCheck = true,          -- skips models in your party
         WallCheck = true,
-        Wallbang = false,          -- fire through walls: moves the ray origin up next to the target
+        Wallbang = true,          -- fire through walls: moves the ray origin up next to the target
         WallbangBack = 4,          -- studs in front of the target the ray starts from
-        MaxDistance = 1500,
+        MaxDistance = math.huge,   -- no range limit on targeting (slider caps at 5000 when touched)
         TargetBots = true,
         TargetPlayers = true,
         AutoFire = false,
@@ -260,7 +260,7 @@ do
                 end
                 if dir.Magnitude > 0 then
                     S.redirected += 1
-                    return Ray.new(origin, dir.Unit * ray.Direction.Magnitude)
+                    return Ray.new(origin, dir.Unit * math.max(ray.Direction.Magnitude, dir.Magnitude + 50))
                 end
             end
         end
