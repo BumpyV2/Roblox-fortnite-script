@@ -45,6 +45,8 @@ local cfg = {
         NoSpread = true,
         NoCooldown = false,        -- client-side cooldown only; server may still gate
         FireRateScale = 1,         -- <1 = faster auto-fire interval
+        BatchRays = false,         -- pack several shots into one packet so the server charges one round for them
+        RaysPerPacket = 2,         -- shots per packet; raise until hits stop registering, then step back
     },
     Visuals = {
         ESP = true,
@@ -296,6 +298,58 @@ if Weapon then
     end, "Weapon.GetAutoAttackInterval")
 end
 
+-- 4) ray batching: N shots leave as ONE packet, so the server spends one round on them
+do
+    local okN, Net = pcall(function() return require(RS.Shared.Net) end)
+    local pk = okN and type(Net) == "table" and Net.packets and Net.packets.yrYHrb8mHa5K2uY8
+    if pk and type(pk.send) == "function" then
+        local origSend = pk.send
+        local pend, pendN, gen = nil, 0, 0
+        local function equipped()
+            local ok, eq = pcall(WC.getEquipped)
+            if ok and type(eq) == "table" and type(eq.Ammo) == "number" then return eq end
+        end
+        local function flush(fromTimer)
+            if not pend then return end
+            local pkt = pend
+            pend, pendN = nil, 0
+            if fromTimer then                      -- buffered shots were refunded; charge the one packet
+                local eq = equipped()
+                if eq then eq.Ammo = math.max(0, eq.Ammo - 1) end
+            end
+            pcall(origSend, pkt)
+        end
+        pk.send = function(pkt, ...)
+            local n = cfg.Weapon.RaysPerPacket
+            if not (S.alive and cfg.Weapon.BatchRays) or n <= 1 or type(pkt) ~= "table"
+               or pkt.isQuickAttack or type(pkt.MkCaVZOOGgaQIGqs) ~= "table" then
+                flush(false)
+                return origSend(pkt, ...)
+            end
+            if pend then
+                for _, r in ipairs(pkt.MkCaVZOOGgaQIGqs) do table.insert(pend.MkCaVZOOGgaQIGqs, r) end
+                pend.requestTime, pend.vfxOrigin = pkt.requestTime, pkt.vfxOrigin
+            else
+                pend = pkt
+            end
+            pendN += 1
+            if pendN >= n then
+                flush(false)                       -- this shot already cost the round the packet is charged
+                S.batched = (S.batched or 0) + 1
+                return
+            end
+            local eq = equipped()                  -- not sent yet: give the round back
+            if eq then eq.Ammo += 1 end
+            gen += 1
+            local mine = gen
+            task.delay(0.2, function() if gen == mine then flush(true) end end)
+        end
+        S.unbatch = function() flush(true); pk.send = origSend end
+    else
+        warn("[hub] shot packet not found; ray batching disabled")
+    end
+end
+
 ----------------------------------------------------------------------
 -- UI
 ----------------------------------------------------------------------
@@ -481,6 +535,8 @@ slider(tWep, "Reload delay (s)", cfg.Weapon, "ReloadDelay", 0, 2, 0.05)
 toggle(tWep, "No recoil / shake", cfg.Weapon, "NoRecoil")
 toggle(tWep, "No spread", cfg.Weapon, "NoSpread")
 toggle(tWep, "No cooldown (client)", cfg.Weapon, "NoCooldown")
+toggle(tWep, "Batch rays (experimental)", cfg.Weapon, "BatchRays")
+slider(tWep, "Rays per packet", cfg.Weapon, "RaysPerPacket", 2, 5, 1)
 slider(tWep, "Fire interval scale", cfg.Weapon, "FireRateScale", 0.2, 1, 0.05)
 
 -- Visuals tab
@@ -730,6 +786,7 @@ end)
 
 function Unload()
     S.alive = false                       -- every hook passes straight through from here on
+    if S.unbatch then pcall(S.unbatch) end
     setFire(false)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for _, h in ipairs(hooks) do
